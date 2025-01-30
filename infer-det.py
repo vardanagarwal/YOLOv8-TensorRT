@@ -4,6 +4,7 @@ from pathlib import Path
 
 import cv2
 import torch
+import torch.cuda.nvtx as nvtx 
 
 from config import CLASSES_DET, COLORS
 from models.torch_utils import det_postprocess
@@ -11,6 +12,7 @@ from models.utils import blob, letterbox, path_to_list
 
 
 def main(args: argparse.Namespace) -> None:
+    nvtx.range_push("Initialization")
     device = torch.device(args.device)
     Engine = TRTModule(args.engine, device)
     H, W = Engine.inp_info[0].shape[-2:]
@@ -24,14 +26,26 @@ def main(args: argparse.Namespace) -> None:
 
     if not args.show and not save_path.exists():
         save_path.mkdir(parents=True, exist_ok=True)
+    
+    nvtx.range_pop() # End Initialization
+
+    # Warmup
+    nvtx.range_push("Warmup")
+    dummy_input = torch.randn(BATCH_SIZE, 3, H, W, device=device)
+    for _ in range(3):
+        Engine(dummy_input)
+    torch.cuda.synchronize()
+    nvtx.range_pop()  # End Warmup
 
     for i in range(0, len(images), BATCH_SIZE):
+        nvtx.range_push(f"Batch {i//BATCH_SIZE}")
         batch_images = images[i:i + BATCH_SIZE]
         batch_tensors = []
         batch_ratios = []
         batch_dwdhs = []
         batch_draws = []
         batch_save_paths = []
+        nvtx.range_push("Image Loading & Preprocessing")
 
         # Prepare batch
         for image in batch_images:
@@ -55,10 +69,12 @@ def main(args: argparse.Namespace) -> None:
             batch_dwdhs.append(dwdh)
             batch_draws.append(draw)
             batch_save_paths.append(save_image)
+        nvtx.range_pop()  # End Image Loading & Preprocessing
 
         if not batch_tensors:
             continue
-
+        
+        nvtx.range_push("Batch Padding")
         # Pad the batch if necessary
         while len(batch_tensors) < BATCH_SIZE:
             batch_tensors.append(batch_tensors[0])
@@ -66,14 +82,20 @@ def main(args: argparse.Namespace) -> None:
             batch_dwdhs.append(batch_dwdhs[0])
             batch_draws.append(batch_draws[0])
             batch_save_paths.append(batch_save_paths[0])
+        nvtx.range_pop()  # End Batch Padding
 
         # Stack tensors into a batch
+        nvtx.range_push("Tensor Preparation")
         tensor = torch.stack(batch_tensors)
         dwdh = torch.stack(batch_dwdhs) * 2  # Multiply by 2 after stacking
+        nvtx.range_pop()  # End Tensor Preparation
 
         # inference
+        nvtx.range_push("Inference")
         data = Engine(tensor)
+        nvtx.range_pop()  # End Inference
 
+        nvtx.range_push("Post-processing")
         # Process each image in the batch
         for idx in range(len(batch_images)):
             # Extract single image data from batch
@@ -113,6 +135,8 @@ def main(args: argparse.Namespace) -> None:
                 cv2.waitKey(0)
             else:
                 cv2.imwrite(str(batch_save_paths[idx]), draw)
+        nvtx.range_pop()  # End Post-processing
+        nvtx.range_pop()  # End Batch
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
