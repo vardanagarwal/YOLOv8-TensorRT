@@ -1,7 +1,7 @@
 from models import TRTModule  # isort:skip
 import argparse
 from pathlib import Path
-
+import numpy as np
 import cv2
 import torch
 import torch.cuda.nvtx as nvtx 
@@ -40,12 +40,9 @@ def main(args: argparse.Namespace) -> None:
     for i in range(0, len(images), BATCH_SIZE):
         nvtx.range_push(f"Batch {i//BATCH_SIZE}")
         batch_images = images[i:i + BATCH_SIZE]
-        batch_tensors = []
-        batch_ratios = []
-        batch_dwdhs = []
-        batch_draws = []
-        batch_save_paths = []
-        nvtx.range_push("Image Loading & Preprocessing")
+        preprocessed_images = []
+        metadata = []
+        nvtx.range_push("Image Loading & Preprocessing CPU")
 
         # Prepare batch
         for image in batch_images:
@@ -57,46 +54,50 @@ def main(args: argparse.Namespace) -> None:
             bgr, ratio, dwdh = letterbox(bgr, (W, H))
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             tensor = blob(rgb, return_seg=False)
-            
+
             # Convert to tensor once and expand dwdh to match bbox format
             tensor = torch.asarray(tensor, device=device)
             dwdh = torch.tensor(dwdh, dtype=torch.float32, device=device)
-            # Expand dwdh to match bbox format [left, top, right, bottom]
-            dwdh = torch.tile(dwdh, (2,))  # This makes it [dx, dy, dx, dy]
-            
-            batch_tensors.append(tensor)
-            batch_ratios.append(ratio)
-            batch_dwdhs.append(dwdh)
-            batch_draws.append(draw)
-            batch_save_paths.append(save_image)
+
+            preprocessed_images.append(tensor)
+            metadata.append({
+                'ratio': ratio,
+                'dwdh': dwdh,
+                'draw': draw,
+                'save_path': save_image
+            })
+
         nvtx.range_pop()  # End Image Loading & Preprocessing
 
-        if not batch_tensors:
+        if not preprocessed_images:
             continue
-        
+
         nvtx.range_push("Batch Padding")
         # Pad the batch if necessary
-        while len(batch_tensors) < BATCH_SIZE:
-            batch_tensors.append(batch_tensors[0])
-            batch_ratios.append(batch_ratios[0])
-            batch_dwdhs.append(batch_dwdhs[0])
-            batch_draws.append(batch_draws[0])
-            batch_save_paths.append(batch_save_paths[0])
+        while len(preprocessed_images) < BATCH_SIZE:
+            preprocessed_images.append(preprocessed_images[0])
+            metadata.append(metadata[0])
         nvtx.range_pop()  # End Batch Padding
 
         # Stack tensors into a batch
-        nvtx.range_push("Tensor Preparation")
-        tensor = torch.stack(batch_tensors)
-        dwdh = torch.stack(batch_dwdhs) * 2  # Multiply by 2 after stacking
+        nvtx.range_push("Tensor Preparation and Push to GPU")
+        batch_tensor = torch.stack(preprocessed_images)
+        batch_tensor = batch_tensor.to(device)
+
+        # Handle dwdh properly
+        dwdh_list = [m['dwdh'] for m in metadata]  # Already tensors on device
+        dwdh_tensor = torch.stack(dwdh_list)
+        dwdh_tensor = torch.tile(dwdh_tensor, (1, 2)) * 2  # Now tile once for the batch
         nvtx.range_pop()  # End Tensor Preparation
 
         # inference
         nvtx.range_push("Inference")
-        data = Engine(tensor)
+        data = Engine(batch_tensor)
         nvtx.range_pop()  # End Inference
 
         nvtx.range_push("Post-processing")
         # Process each image in the batch
+        processed_results = []
         for idx in range(len(batch_images)):
             # Extract single image data from batch
             single_data = [d[idx:idx+1] for d in data]
@@ -105,11 +106,23 @@ def main(args: argparse.Namespace) -> None:
             # if bboxes.numel() == 0:
             #     print(f'{batch_images[idx]}: no object!')
             #     continue
+            if bboxes.numel() > 0:
+                bboxes -= dwdh_tensor[idx].view(1, -1)
+                bboxes /= metadata[idx]['ratio']
 
-            # Apply scaling
-            bboxes -= dwdh[idx].view(1, -1)  # Reshape dwdh to match bboxes dimension
-            bboxes /= batch_ratios[idx]
-            draw = batch_draws[idx]
+                processed_results.append({
+                    'bboxes': bboxes,
+                    'scores': scores,
+                    'labels': labels,
+                    'metadata': metadata[idx]
+                })
+        
+        for result in processed_results:
+            bboxes = result['bboxes'].cpu()
+            scores = result['scores'].cpu()
+            labels = result['labels'].cpu()
+            draw = result['metadata']['draw']
+            save_path = result['metadata']['save_path']
 
             # Draw detections
             for (bbox, score, label) in zip(bboxes, scores, labels):
@@ -134,7 +147,7 @@ def main(args: argparse.Namespace) -> None:
                 cv2.imshow('result', draw)
                 cv2.waitKey(0)
             else:
-                cv2.imwrite(str(batch_save_paths[idx]), draw)
+                cv2.imwrite(str(save_path), draw)
         nvtx.range_pop()  # End Post-processing
         nvtx.range_pop()  # End Batch
 
