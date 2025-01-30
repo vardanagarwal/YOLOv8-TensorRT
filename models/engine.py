@@ -1,8 +1,10 @@
 import os
 import pickle
-from collections import defaultdict, namedtuple
+from collections import defaultdict, namedtuple, OrderedDict
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
+import numpy as np
+
 
 import onnx
 import tensorrt as trt
@@ -37,12 +39,20 @@ class EngineBuilder:
                        conf_thres: float = 0.25,
                        topk: int = 100,
                        with_profiling: bool = True) -> None:
-        logger = trt.Logger(trt.Logger.WARNING)
+        logger = trt.Logger(trt.Logger.INFO)
+        logger.min_severity = trt.Logger.Severity.VERBOSE
         trt.init_libnvinfer_plugins(logger, namespace='')
         builder = trt.Builder(logger)
         config = builder.create_builder_config()
-        config.max_workspace_size = torch.cuda.get_device_properties(
-            self.device).total_memory
+        # config.max_workspace_size = torch.cuda.get_device_properties(
+        #     self.device).total_memory
+        is_trt10 = int(trt.__version__.split(".")[0]) >= 10 
+        # workspace = int(self.args.workspace * (1 << 30)) if self.args.workspace is not None else 0
+        workspace = 0
+        if is_trt10 and workspace > 0:
+            config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace)
+        elif workspace > 0:  # TensorRT versions 7, 8
+            config.max_workspace_size = workspace
         flag = (1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
         network = builder.create_network(flag)
 
@@ -59,8 +69,9 @@ class EngineBuilder:
 
         if with_profiling:
             config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
-        with self.builder.build_engine(self.network, config) as engine:
-            self.weight.write_bytes(engine.serialize())
+        with self.builder.build_serialized_network(self.network, config)  if is_trt10 else self.builder.build_engine(self.network, config) as engine:
+            # self.weight.write_bytes(engine.serialize())
+            self.weight.write_bytes(engine if is_trt10 else engine.serialize())
         self.logger.log(
             trt.Logger.WARNING, f'Build tensorrt engine finish.\n'
             f'Save in {str(self.weight.absolute())}')
@@ -225,17 +236,26 @@ class TRTModule(torch.nn.Module):
             model = runtime.deserialize_cuda_engine(self.weight.read_bytes())
 
         context = model.create_execution_context()
-        num_bindings = model.num_bindings
-        names = [model.get_binding_name(i) for i in range(num_bindings)]
+        self.is_trt10 = not hasattr(model, "num_bindings")
+        num_bindings = model.num_io_tensors if self.is_trt10 else model.num_bindings
+
+        names = [model.get_binding_name(i) if not self.is_trt10 else model.get_tensor_name(i)  for i in range(num_bindings)]
 
         self.bindings: List[int] = [0] * num_bindings
         num_inputs, num_outputs = 0, 0
 
-        for i in range(num_bindings):
-            if model.binding_is_input(i):
-                num_inputs += 1
-            else:
-                num_outputs += 1
+        if self.is_trt10:
+            for i in range(num_bindings):
+                if model.get_tensor_mode(model.get_tensor_name(i)) == trt.TensorIOMode.INPUT:
+                    num_inputs += 1
+                else:
+                    num_outputs += 1
+        else:
+            for i in range(num_bindings):
+                if model.binding_is_input(i):
+                    num_inputs += 1
+                else:
+                    num_outputs += 1
 
         self.num_bindings = num_bindings
         self.num_inputs = num_inputs
@@ -252,17 +272,28 @@ class TRTModule(torch.nn.Module):
         inp_info = []
         out_info = []
         for i, name in enumerate(self.input_names):
-            assert self.model.get_binding_name(i) == name
-            dtype = self.dtypeMapping[self.model.get_binding_dtype(i)]
-            shape = tuple(self.model.get_binding_shape(i))
+            if not self.is_trt10:
+                assert self.model.get_binding_name(i) == name
+                dtype = self.dtypeMapping[self.model.get_binding_dtype(i)]
+                shape = tuple(self.model.get_binding_shape(i))
+            else:
+                assert self.model.get_tensor_name(i) == name
+                dtype = self.dtypeMapping[self.model.get_tensor_dtype(name)]
+                shape = tuple(self.model.get_tensor_shape(name))
             if -1 in shape:
                 idynamic |= True
             inp_info.append(Tensor(name, dtype, shape))
+            
         for i, name in enumerate(self.output_names):
             i += self.num_inputs
-            assert self.model.get_binding_name(i) == name
-            dtype = self.dtypeMapping[self.model.get_binding_dtype(i)]
-            shape = tuple(self.model.get_binding_shape(i))
+            if not self.is_trt10:
+                assert self.model.get_binding_name(i) == name
+                dtype = self.dtypeMapping[self.model.get_binding_dtype(i)]
+                shape = tuple(self.model.get_binding_shape(i))
+            else:
+                assert self.model.get_tensor_name(i) == name
+                dtype = self.dtypeMapping[self.model.get_tensor_dtype(name)]
+                shape = tuple(self.model.get_tensor_shape(name))
             if -1 in shape:
                 odynamic |= True
             out_info.append(Tensor(name, dtype, shape))
@@ -294,30 +325,45 @@ class TRTModule(torch.nn.Module):
         ]
 
         for i in range(self.num_inputs):
-            self.bindings[i] = contiguous_inputs[i].data_ptr()
-            if self.idynamic:
-                self.context.set_binding_shape(
-                    i, tuple(contiguous_inputs[i].shape))
-
+            if self.is_trt10:
+                self.context.set_tensor_address(self.input_names[i], contiguous_inputs[i].data_ptr())
+                if self.idynamic:
+                    self.context.set_input_shape(
+                        self.input_names[i], tuple(contiguous_inputs[i].shape))
+            else:
+                self.bindings[i] = contiguous_inputs[i].data_ptr()
+                if self.idynamic:
+                    self.context.set_binding_shape(
+                        i, tuple(contiguous_inputs[i].shape))
         outputs: List[torch.Tensor] = []
 
         for i in range(self.num_outputs):
-            j = i + self.num_inputs
             if self.odynamic:
-                shape = tuple(self.context.get_binding_shape(j))
+                if self.is_trt10:
+                    shape = tuple(self.context.get_tensor_shape(self.output_names[i]))
+                else:
+                    shape = tuple(self.context.get_binding_shape(i + self.num_inputs))
                 output = torch.empty(size=shape,
-                                     dtype=self.out_info[i].dtype,
-                                     device=self.device)
+                                dtype=self.out_info[i].dtype,
+                                device=self.device)
             else:
                 output = self.output_tensor[i]
-            self.bindings[j] = output.data_ptr()
+                
+            if self.is_trt10:
+                self.context.set_tensor_address(self.output_names[i], output.data_ptr())
+            else:
+                self.bindings[i + self.num_inputs] = output.data_ptr()
             outputs.append(output)
 
-        self.context.execute_async_v2(self.bindings, self.stream.cuda_stream)
+        if self.is_trt10:
+            self.context.execute_async_v3(self.stream.cuda_stream)
+        else:
+            self.context.execute_async_v2(self.bindings, self.stream.cuda_stream)
+            
         self.stream.synchronize()
 
         return tuple(outputs[i]
-                     for i in self.idx) if len(outputs) > 1 else outputs[0]
+                    for i in self.idx) if len(outputs) > 1 else outputs[0]
 
 
 class TRTProfilerV1(trt.IProfiler):

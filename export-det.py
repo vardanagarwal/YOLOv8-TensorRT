@@ -32,10 +32,10 @@ def parse_args():
                         type=int,
                         default=100,
                         help='Max number of detection bboxes')
-    parser.add_argument('--opset',
-                        type=int,
-                        default=11,
-                        help='ONNX opset version')
+    # parser.add_argument('--opset',
+    #                     type=int,
+    #                     default=11,
+    #                     help='ONNX opset version')
     parser.add_argument('--sim',
                         action='store_true',
                         help='simplify onnx model')
@@ -53,6 +53,7 @@ def parse_args():
     PostDetect.conf_thres = args.conf_thres
     PostDetect.iou_thres = args.iou_thres
     PostDetect.topk = args.topk
+    args.opset = max(int(k[14:]) for k in vars(torch.onnx) if "symbolic_opset" in k) - 1
     return args
 
 
