@@ -184,14 +184,16 @@ def main(args: argparse.Namespace) -> None:
                         (255, 255, 255),
                         2,
                     )
+            nvtx.range_pop()  # End Post-processing
 
+            nvtx.range_push("Tracking")
             detections_list = (
                 np.array(detections_list) if detections_list else np.empty((0, 7))
             )
             tracks = tracker.update(
                 detections_list,
-                (draw.shape[1], draw.shape[0]),
-                (draw.shape[1], draw.shape[0]),
+                (bgr.shape[1], bgr.shape[0]),
+                (bgr.shape[1], bgr.shape[0]),
             )
             tracked_detection = []
             for track in tracks:
@@ -213,6 +215,7 @@ def main(args: argparse.Namespace) -> None:
                             "classify": track[7],
                         }
                     )
+            nvtx.range_pop()  # End Tracking
             print(tracked_detection)
 
             if args.show:
@@ -220,7 +223,6 @@ def main(args: argparse.Namespace) -> None:
                 cv2.waitKey(0)
             if args.save:
                 cv2.imwrite(str(save_path), draw)
-        nvtx.range_pop()  # End Post-processing
         nvtx.range_pop()  # End Batch
 
 
