@@ -42,6 +42,7 @@ def main(args: argparse.Namespace) -> None:
         batch_images = images[i:i + BATCH_SIZE]
         preprocessed_images = []
         metadata = []
+        dwdh_list = []
         nvtx.range_push("Image Loading & Preprocessing CPU")
 
         # Prepare batch
@@ -52,17 +53,18 @@ def main(args: argparse.Namespace) -> None:
                 continue
             draw = bgr.copy()
             bgr, ratio, dwdh = letterbox(bgr, (W, H))
-            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            tensor = blob(rgb, return_seg=False)
+            # rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            tensor = blob(bgr, return_seg=False)
 
             # Convert to tensor once and expand dwdh to match bbox format
             tensor = torch.asarray(tensor, device=device)
-            dwdh = torch.tensor(dwdh, dtype=torch.float32, device=device)
+            dwdh_list.append(dwdh)
+            # dwdh = torch.tensor(dwdh, dtype=torch.float32, device=device)
 
             preprocessed_images.append(tensor)
             metadata.append({
                 'ratio': ratio,
-                'dwdh': dwdh,
+                # 'dwdh': dwdh,
                 'draw': draw,
                 'save_path': save_image
             })
@@ -85,9 +87,9 @@ def main(args: argparse.Namespace) -> None:
         batch_tensor = batch_tensor.to(device)
 
         # Handle dwdh properly
-        dwdh_list = [m['dwdh'] for m in metadata]  # Already tensors on device
-        dwdh_tensor = torch.stack(dwdh_list)
-        dwdh_tensor = torch.tile(dwdh_tensor, (1, 2))  # Now tile once for the batch
+        # dwdh_list = [m['dwdh'] for m in metadata]  # Already tensors on device
+        dwdh_tensor = torch.tile(torch.tensor(dwdh_list, dtype=torch.float32, device=device), (1, 2))
+        # dwdh_tensor = torch.tile(dwdh_tensor)  # Now tile once for the batch
         nvtx.range_pop()  # End Tensor Preparation
 
         # inference
