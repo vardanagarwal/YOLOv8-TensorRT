@@ -22,10 +22,11 @@ def main(args: argparse.Namespace) -> None:
     Engine.set_desired(['num_dets', 'bboxes', 'scores', 'labels'])
 
     images = path_to_list(args.imgs)
-    save_path = Path(args.out_dir)
+    if args.save:
+        save_path = Path(args.out_dir)
 
-    if not args.show and not save_path.exists():
-        save_path.mkdir(parents=True, exist_ok=True)
+        if not save_path.exists():
+            save_path.mkdir(parents=True, exist_ok=True)
     
     nvtx.range_pop() # End Initialization
 
@@ -39,7 +40,8 @@ def main(args: argparse.Namespace) -> None:
 
     for i in range(0, len(images), BATCH_SIZE):
         nvtx.range_push(f"Batch {i//BATCH_SIZE}")
-        save_path = Path(args.out_dir)
+        if args.save:
+            save_path = Path(args.out_dir)
         batch_images = images[i:i + BATCH_SIZE]
         preprocessed_images = []
         metadata = []
@@ -48,7 +50,6 @@ def main(args: argparse.Namespace) -> None:
 
         # Prepare batch
         for image in batch_images:
-            save_image = save_path / image.name
             bgr = cv2.imread(str(image))
             if bgr is None:
                 continue
@@ -67,8 +68,10 @@ def main(args: argparse.Namespace) -> None:
                 'ratio': ratio,
                 # 'dwdh': dwdh,
                 'draw': draw,
-                'save_path': save_image
             })
+            if args.save:
+                save_image = save_path / image.name
+                metadata[-1]['save_path'] = save_image
 
         nvtx.range_pop()  # End Image Loading & Preprocessing
 
@@ -125,7 +128,8 @@ def main(args: argparse.Namespace) -> None:
             scores = result['scores'].cpu()
             labels = result['labels'].cpu()
             draw = result['metadata']['draw']
-            save_path = result['metadata']['save_path']
+            if args.save:
+                save_path = result['metadata']['save_path']
 
             # Draw detections
             for (bbox, score, label) in zip(bboxes, scores, labels):
@@ -149,7 +153,7 @@ def main(args: argparse.Namespace) -> None:
             if args.show:
                 cv2.imshow('result', draw)
                 cv2.waitKey(0)
-            else:
+            if args.save:
                 cv2.imwrite(str(save_path), draw)
         nvtx.range_pop()  # End Post-processing
         nvtx.range_pop()  # End Batch
@@ -173,6 +177,9 @@ def parse_args() -> argparse.Namespace:
                         type=int,
                         default=1,
                         help='TensorRT batch size')
+    parser.add_argument('--save',
+                        action='store_true',
+                        help='Save the detection result images')
     args = parser.parse_args()
     return args
 
