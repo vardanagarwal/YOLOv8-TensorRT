@@ -50,6 +50,8 @@ def main(args: argparse.Namespace) -> None:
         # Prepare batch
         for image in batch_images:
             bgr = cv2.imread(str(image))
+            if args.save:
+                draw = bgr.copy()
             if bgr is None:
                 continue
             bgr, ratio, dwdh = letterbox(bgr, (W, H))
@@ -65,7 +67,7 @@ def main(args: argparse.Namespace) -> None:
                 }
             )
             if args.save:
-                draw = bgr.copy()
+                # draw = bgr.copy()
                 metadata[-1]["draw"] = draw
                 save_image = save_path / image.name
                 metadata[-1]["save_path"] = save_image

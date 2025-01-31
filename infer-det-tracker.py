@@ -57,6 +57,8 @@ def main(args: argparse.Namespace) -> None:
             bgr = cv2.imread(str(image))
             if bgr is None:
                 continue
+            if args.save:
+                draw = bgr.copy()
             bgr, ratio, dwdh = letterbox(bgr, (W, H))
 
             dwdh_list.append(dwdh)
@@ -70,7 +72,6 @@ def main(args: argparse.Namespace) -> None:
                 }
             )
             if args.save:
-                draw = bgr.copy()
                 metadata[-1]["draw"] = draw
                 save_image = save_path / image.name
                 metadata[-1]["save_path"] = save_image
