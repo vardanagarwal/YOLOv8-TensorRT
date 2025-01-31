@@ -39,6 +39,7 @@ def main(args: argparse.Namespace) -> None:
 
     for i in range(0, len(images), BATCH_SIZE):
         nvtx.range_push(f"Batch {i//BATCH_SIZE}")
+        save_path = Path(args.out_dir)
         batch_images = images[i:i + BATCH_SIZE]
         preprocessed_images = []
         metadata = []
