@@ -87,7 +87,7 @@ def main(args: argparse.Namespace) -> None:
         # Handle dwdh properly
         dwdh_list = [m['dwdh'] for m in metadata]  # Already tensors on device
         dwdh_tensor = torch.stack(dwdh_list)
-        dwdh_tensor = torch.tile(dwdh_tensor, (1, 2)) * 2  # Now tile once for the batch
+        dwdh_tensor = torch.tile(dwdh_tensor, (1, 2))  # Now tile once for the batch
         nvtx.range_pop()  # End Tensor Preparation
 
         # inference
