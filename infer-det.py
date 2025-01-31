@@ -8,7 +8,7 @@ import torch.cuda.nvtx as nvtx
 
 from config import CLASSES_DET, COLORS
 from models.torch_utils import det_postprocess
-from models.utils import blob, letterbox, path_to_list
+from models.utils import batch_blob, letterbox, path_to_list
 
 
 def main(args: argparse.Namespace) -> None:
@@ -55,15 +55,10 @@ def main(args: argparse.Namespace) -> None:
                 continue
             draw = bgr.copy()
             bgr, ratio, dwdh = letterbox(bgr, (W, H))
-            # rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            tensor = blob(bgr, return_seg=False)
 
-            # Convert to tensor once and expand dwdh to match bbox format
-            tensor = torch.asarray(tensor, device=device)
             dwdh_list.append(dwdh)
-            # dwdh = torch.tensor(dwdh, dtype=torch.float32, device=device)
+            preprocessed_images.append(bgr)
 
-            preprocessed_images.append(tensor)
             metadata.append({
                 'ratio': ratio,
                 # 'dwdh': dwdh,
@@ -87,13 +82,11 @@ def main(args: argparse.Namespace) -> None:
 
         # Stack tensors into a batch
         nvtx.range_push("Tensor Preparation and Push to GPU")
-        batch_tensor = torch.stack(preprocessed_images)
-        batch_tensor = batch_tensor.to(device)
+        batch_tensor = batch_blob(preprocessed_images)
+        batch_tensor = batch_tensor.to(device) / 255.0
 
         # Handle dwdh properly
-        # dwdh_list = [m['dwdh'] for m in metadata]  # Already tensors on device
         dwdh_tensor = torch.tile(torch.tensor(dwdh_list, dtype=torch.float32, device=device), (1, 2))
-        # dwdh_tensor = torch.tile(dwdh_tensor)  # Now tile once for the batch
         nvtx.range_pop()  # End Tensor Preparation
 
         # inference

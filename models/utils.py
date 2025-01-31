@@ -4,6 +4,7 @@ from typing import List, Tuple, Union
 import cv2
 import numpy as np
 from numpy import ndarray
+import torch
 
 # image suffixs
 SUFFIXS = ('.bmp', '.dng', '.jpeg', '.jpg', '.mpo', '.png', '.tif', '.tiff',
@@ -50,14 +51,23 @@ def letterbox(im: ndarray,
 def blob(im: ndarray, return_seg: bool = False) -> Union[ndarray, Tuple]:
     seg = None
     if return_seg:
+        im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
         seg = im.astype(np.float32) / 255
-    im = im.transpose([2, 0, 1])
+    im = im[..., ::-1].transpose([2, 0, 1]) # BGR to RGB, HWC to CHW
     im = im[np.newaxis, ...]
     im = np.ascontiguousarray(im).astype(np.float32) / 255
     if return_seg:
         return im, seg
     else:
         return im
+    
+
+def batch_blob(im: List[ndarray]) -> torch.Tensor:
+    im = np.stack(im)
+    im = im[..., ::-1].transpose((0, 3, 1, 2))
+    im = np.ascontiguousarray(im)
+    im = torch.from_numpy(im)
+    return im
 
 
 def sigmoid(x: ndarray) -> ndarray:
