@@ -57,7 +57,6 @@ def main(args: argparse.Namespace) -> None:
             bgr = cv2.imread(str(image))
             if bgr is None:
                 continue
-            draw = bgr.copy()
             bgr, ratio, dwdh = letterbox(bgr, (W, H))
 
             dwdh_list.append(dwdh)
@@ -67,10 +66,12 @@ def main(args: argparse.Namespace) -> None:
                 {
                     "ratio": ratio,
                     # 'dwdh': dwdh,
-                    "draw": draw,
+                    # "draw": draw,
                 }
             )
             if args.save:
+                draw = bgr.copy()
+                metadata[-1]["draw"] = draw
                 save_image = save_path / image.name
                 metadata[-1]["save_path"] = save_image
 
@@ -130,8 +131,8 @@ def main(args: argparse.Namespace) -> None:
             bboxes = result["bboxes"].cpu()
             scores = result["scores"].cpu()
             labels = result["labels"].cpu()
-            draw = result["metadata"]["draw"]
             if args.save:
+                draw = result["metadata"]["draw"]
                 save_path = result["metadata"]["save_path"]
 
             detections_list = []
