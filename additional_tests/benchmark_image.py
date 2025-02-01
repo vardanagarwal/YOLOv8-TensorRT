@@ -3,7 +3,6 @@ import numpy as np
 from PIL import Image
 import io
 import time
-import matplotlib.pyplot as plt
 
 def generate_sample_frame(width=1920, height=1080):
     """Generate a sample frame similar to what you'd get from kafka"""
@@ -52,42 +51,6 @@ def analyze_differences(img1, img2):
     print(f"Percentage different: {(num_diff_pixels/total_pixels)*100:.2f}%")
     print(f"Max difference value: {diff.max()}")
     
-    # Save comparison visualization
-    plt.figure(figsize=(15, 5))
-    
-    plt.subplot(131)
-    plt.title('PIL+Numpy Method')
-    plt.imshow(img1_rgb)
-    plt.axis('off')
-    
-    plt.subplot(132)
-    plt.title('Direct CV2 Method')
-    plt.imshow(img2_rgb)
-    plt.axis('off')
-    
-    plt.subplot(133)
-    plt.title('Difference (brightened)')
-    plt.imshow(diff * 5)  # Multiply by 5 to make differences more visible
-    plt.axis('off')
-    
-    plt.tight_layout()
-    plt.savefig('image_comparison.png')
-    plt.close()
-    
-    # Save individual channels difference
-    if len(img1.shape) == 3:
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        channel_names = ['Red', 'Green', 'Blue']
-        
-        for i, (name, ax) in enumerate(zip(channel_names, axes)):
-            channel_diff = diff[:,:,i]
-            ax.imshow(channel_diff, cmap='hot')
-            ax.set_title(f'{name} Channel Differences')
-            ax.axis('off')
-        
-        plt.tight_layout()
-        plt.savefig('channel_differences.png')
-        plt.close()
 
 def benchmark_and_compare():
     # Generate sample frame
