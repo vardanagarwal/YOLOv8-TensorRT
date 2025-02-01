@@ -5,10 +5,60 @@ import numpy as np
 import cv2
 import torch
 import torch.cuda.nvtx as nvtx
+from concurrent.futures import ThreadPoolExecutor
 
 from config import CLASSES_DET, COLORS
 from models.torch_utils import det_postprocess
 from models.utils import batch_blob, letterbox, path_to_list
+
+
+def process_single_image(image, W, H, args, save_path):
+    """Process a single image in a separate thread"""
+    bgr = cv2.imread(str(image))
+    if bgr is None:
+        return None, None, None
+
+    if args.save:
+        draw = bgr.copy()
+    else:
+        draw = None
+
+    # Perform letterbox operation
+    bgr, ratio, dwdh = letterbox(bgr, (W, H))
+
+    metadata = {
+        "ratio": ratio,
+    }
+
+    if args.save:
+        metadata["draw"] = draw
+        metadata["save_path"] = save_path / image.name
+
+    return bgr, metadata, dwdh
+
+
+def prepare_batch_threaded(batch_images, W, H, args, save_path, max_workers=16):
+    """Process batch of images using multiple threads"""
+    preprocessed_images = []
+    metadata = []
+    dwdh_list = []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all image processing tasks
+        future_to_image = {
+            executor.submit(process_single_image, image, W, H, args, save_path): image
+            for image in batch_images
+        }
+
+        # Collect results as they complete
+        for future in future_to_image:
+            bgr, meta, dwdh = future.result()
+            if bgr is not None:
+                preprocessed_images.append(bgr)
+                metadata.append(meta)
+                dwdh_list.append(dwdh)
+
+    return preprocessed_images, metadata, dwdh_list
 
 
 def main(args: argparse.Namespace) -> None:
@@ -48,29 +98,34 @@ def main(args: argparse.Namespace) -> None:
         nvtx.range_push("Image Loading & Preprocessing CPU")
 
         # Prepare batch
-        for image in batch_images:
-            bgr = cv2.imread(str(image))
-            if args.save:
-                draw = bgr.copy()
-            if bgr is None:
-                continue
-            bgr, ratio, dwdh = letterbox(bgr, (W, H))
-
-            dwdh_list.append(dwdh)
-            preprocessed_images.append(bgr)
-
-            metadata.append(
-                {
-                    "ratio": ratio,
-                    # 'dwdh': dwdh,
-                    # 'draw': draw,
-                }
+        if args.multi_thread:
+            preprocessed_images, metadata, dwdh_list = prepare_batch_threaded(
+                batch_images, W, H, args, save_path if args.save else None
             )
-            if args.save:
-                # draw = bgr.copy()
-                metadata[-1]["draw"] = draw
-                save_image = save_path / image.name
-                metadata[-1]["save_path"] = save_image
+        else:
+            for image in batch_images:
+                bgr = cv2.imread(str(image))
+                if bgr is None:
+                    continue
+
+                if args.save:
+                    draw = bgr.copy()
+
+                # Perform letterbox operation
+                bgr, ratio, dwdh = letterbox(bgr, (W, H))
+
+                metadata.append(
+                    {
+                        "ratio": ratio,
+                    }
+                )
+
+                if args.save:
+                    metadata[-1]["draw"] = draw
+                    metadata[-1]["save_path"] = save_path / image.name
+
+                preprocessed_images.append(bgr)
+                dwdh_list.append(dwdh)
 
         nvtx.range_pop()  # End Image Loading & Preprocessing
 
@@ -191,6 +246,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1, help="TensorRT batch size")
     parser.add_argument(
         "--save", action="store_true", help="Save the detection result images"
+    )
+    parser.add_argument(
+        "--multi-thread", action="store_true", help="Use multi-threading"
     )
     args = parser.parse_args()
     return args
