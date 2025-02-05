@@ -78,13 +78,6 @@ def batch_blob(im: List[ndarray], half: bool=False) -> torch.Tensor:
     im = np.ascontiguousarray(im)
     tensor = torch.from_numpy(im)
     
-    # Convert to FP16 if requested (do this on CPU)
-    if half:
-        tensor = tensor.half()
-    
-    # Pin memory for faster transfer
-    tensor = tensor.pin_memory()
-    
     return tensor
 
 
