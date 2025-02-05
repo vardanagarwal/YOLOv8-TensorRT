@@ -3,6 +3,8 @@ import numpy as np
 from PIL import Image
 import io
 import time
+from torchvision.io import decode_image
+import torch
 
 def generate_sample_frame(width=1920, height=1080):
     """Generate a sample frame similar to what you'd get from kafka"""
@@ -20,6 +22,10 @@ def method2_direct_cv2(frame):
     """Direct CV2 decoding with RGB conversion"""
     bgr = cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_COLOR)
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+def method3_torchvision(frame):
+    image = decode_image(torch.frombuffer(frame, dtype=torch.uint8))
+    return image.permute(1, 2, 0).cpu().numpy()
 
 def analyze_differences(img1, img2):
     """Detailed analysis of differences between images"""
@@ -61,6 +67,7 @@ def benchmark_and_compare():
     print("\nProcessing images...")
     img1 = method1_pil_numpy(frame)
     img2 = method2_direct_cv2(frame)
+    img3 = method3_torchvision(frame)
     
     # Benchmark timing
     num_iterations = 100
@@ -78,14 +85,23 @@ def benchmark_and_compare():
         _ = method2_direct_cv2(frame)
     time2 = (time.perf_counter() - start) / num_iterations
     
+    # Time method 3 (CUDA)
+    start = time.perf_counter()
+    for _ in range(num_iterations):
+        _ = method3_torchvision(frame)
+    time3 = (time.perf_counter() - start) / num_iterations
+    
     # Print timing results
     print("\nTiming Results (seconds per image):")
     print(f"PIL + Numpy method:  {time1:.6f}")
     print(f"Direct CV2 method:   {time2:.6f}")
-    print(f"Speedup factor:      {time1/time2:.2f}x")
+    print(f"CUDA method:         {time3:.6f}")
+    print(f"Speedup factor (CUDA vs PIL): {time1/time3:.2f}x")
+    print(f"Speedup factor (CUDA vs CV2): {time2/time3:.2f}x")
     
     # Analyze differences
     analyze_differences(img1, img2)
+    analyze_differences(img1, img3)
 
 if __name__ == "__main__":
     benchmark_and_compare()
