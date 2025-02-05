@@ -3,29 +3,35 @@ import numpy as np
 from PIL import Image
 import io
 import time
-from torchvision.io import decode_image
+from torchvision.io import decode_jpeg
 import torch
 
 def generate_sample_frame(width=1920, height=1080):
     """Generate a sample frame similar to what you'd get from kafka"""
     # Create a sample image
-    img = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
+    img = np.ones((height, width, 3), dtype=np.uint8) * 40
     # Encode it to jpg bytes like it would be in kafka
     _, buffer = cv2.imencode('.jpg', img)
     return buffer.tobytes()
 
-def method1_pil_numpy(frame):
+def method1_pil_numpy():
     """Current method using PIL + numpy"""
+    frame = generate_sample_frame()
     return np.array(Image.open(io.BytesIO(np.frombuffer(frame, np.uint8))))
 
-def method2_direct_cv2(frame):
+def method2_direct_cv2():
     """Direct CV2 decoding with RGB conversion"""
+    frame = generate_sample_frame()
     bgr = cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_COLOR)
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-def method3_torchvision(frame):
-    image = decode_image(torch.frombuffer(frame, dtype=torch.uint8))
-    return image.permute(1, 2, 0).cpu().numpy()
+def method3_torchvision(batch_size=16):
+    batch = []
+    for _ in range(batch_size):
+        frame = generate_sample_frame()
+        batch.append(torch.frombuffer(bytearray(frame), dtype=torch.uint8))
+    images = torch.stack(decode_jpeg(batch, device='cuda')).permute(0, 2, 3, 1)
+    return images.cpu().numpy()
 
 def analyze_differences(img1, img2):
     """Detailed analysis of differences between images"""
@@ -65,30 +71,31 @@ def benchmark_and_compare():
     
     # Run methods
     print("\nProcessing images...")
-    img1 = method1_pil_numpy(frame)
-    img2 = method2_direct_cv2(frame)
-    img3 = method3_torchvision(frame)
+    img1 = method1_pil_numpy()
+    img2 = method2_direct_cv2()
+    img3 = method3_torchvision()
+    img3 = img3[0]
     
     # Benchmark timing
-    num_iterations = 100
+    num_iterations = 1000
     print(f"\nBenchmarking {num_iterations} iterations...")
     
     # Time method 1
     start = time.perf_counter()
     for _ in range(num_iterations):
-        _ = method1_pil_numpy(frame)
+        _ = method1_pil_numpy()
     time1 = (time.perf_counter() - start) / num_iterations
     
     # Time method 2
     start = time.perf_counter()
     for _ in range(num_iterations):
-        _ = method2_direct_cv2(frame)
+        _ = method2_direct_cv2()
     time2 = (time.perf_counter() - start) / num_iterations
     
     # Time method 3 (CUDA)
     start = time.perf_counter()
-    for _ in range(num_iterations):
-        _ = method3_torchvision(frame)
+    for _ in range(0, num_iterations, 16):
+        _ = method3_torchvision()
     time3 = (time.perf_counter() - start) / num_iterations
     
     # Print timing results
