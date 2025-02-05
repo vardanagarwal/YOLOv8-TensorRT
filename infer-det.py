@@ -117,8 +117,12 @@ def main(args: argparse.Namespace) -> None:
             with profiler.range("Tensor Preparation"):
                 with torch.cuda.stream(Engine.stream):
                     # Prepare input tensor with proper memory alignment
-                    batch_tensor = batch_blob(preprocessed_images, args.half)
-                    batch_tensor = batch_tensor.to(device, non_blocking=True) / 255.0
+                    batch_tensor = batch_blob(preprocessed_images)
+                    
+                    if args.half:
+                        batch_tensor = batch_tensor.to(device).half() / 255.0
+                    else:
+                        batch_tensor = batch_tensor.to(device) / 255.0
                     
                     # Prepare dwdh tensor efficiently
                     dwdh_tensor = torch.tensor(dwdh_list, 
