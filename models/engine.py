@@ -279,6 +279,7 @@ class TRTModule(torch.nn.Module):
             else:
                 assert self.model.get_tensor_name(i) == name
                 dtype = self.dtypeMapping[self.model.get_tensor_dtype(name)]
+                self.half = trt.nptype(self.model.get_tensor_dtype(name)) == np.float16
                 shape = tuple(self.model.get_tensor_shape(name))
             if -1 in shape:
                 idynamic |= True
@@ -318,52 +319,50 @@ class TRTModule(torch.nn.Module):
             self.idx = [self.output_names.index(i) for i in desired]
 
     def forward(self, *inputs) -> Union[Tuple, torch.Tensor]:
+        with torch.cuda.stream(self.stream):
+            # Ensure inputs are contiguous and in the right format
+            assert len(inputs) == self.num_inputs
+            contiguous_inputs = [
+                i.contiguous().half() if i.dtype != torch.float16 and self.half else i.contiguous() 
+                for i in inputs
+            ]
 
-        assert len(inputs) == self.num_inputs
-        contiguous_inputs: List[torch.Tensor] = [
-            i.contiguous() for i in inputs
-        ]
-
-        for i in range(self.num_inputs):
-            if self.is_trt10:
-                self.context.set_tensor_address(self.input_names[i], contiguous_inputs[i].data_ptr())
-                if self.idynamic:
-                    self.context.set_input_shape(
-                        self.input_names[i], tuple(contiguous_inputs[i].shape))
-            else:
-                self.bindings[i] = contiguous_inputs[i].data_ptr()
-                if self.idynamic:
-                    self.context.set_binding_shape(
-                        i, tuple(contiguous_inputs[i].shape))
-        outputs: List[torch.Tensor] = []
-
-        for i in range(self.num_outputs):
-            if self.odynamic:
+            # Set input tensors
+            for i in range(self.num_inputs):
                 if self.is_trt10:
-                    shape = tuple(self.context.get_tensor_shape(self.output_names[i]))
+                    self.context.set_tensor_address(self.input_names[i], contiguous_inputs[i].data_ptr())
+                    if self.idynamic:
+                        self.context.set_input_shape(self.input_names[i], tuple(contiguous_inputs[i].shape))
                 else:
-                    shape = tuple(self.context.get_binding_shape(i + self.num_inputs))
-                output = torch.empty(size=shape,
-                                dtype=self.out_info[i].dtype,
-                                device=self.device)
-            else:
-                output = self.output_tensor[i]
-                
+                    self.bindings[i] = contiguous_inputs[i].data_ptr()
+                    if self.idynamic:
+                        self.context.set_binding_shape(i, tuple(contiguous_inputs[i].shape))
+
+            # Prepare output tensors
+            outputs = []
+            for i in range(self.num_outputs):
+                if self.odynamic:
+                    shape = (tuple(self.context.get_tensor_shape(self.output_names[i]))
+                            if self.is_trt10 else
+                            tuple(self.context.get_binding_shape(i + self.num_inputs)))
+                    output = torch.empty(size=shape, dtype=self.out_info[i].dtype, device=self.device)
+                else:
+                    output = self.output_tensor[i]
+
+                if self.is_trt10:
+                    self.context.set_tensor_address(self.output_names[i], output.data_ptr())
+                else:
+                    self.bindings[i + self.num_inputs] = output.data_ptr()
+                outputs.append(output)
+
+            # Execute inference
             if self.is_trt10:
-                self.context.set_tensor_address(self.output_names[i], output.data_ptr())
+                self.context.execute_async_v3(self.stream.cuda_stream)
             else:
-                self.bindings[i + self.num_inputs] = output.data_ptr()
-            outputs.append(output)
+                self.context.execute_async_v2(self.bindings, self.stream.cuda_stream)
 
-        if self.is_trt10:
-            self.context.execute_async_v3(self.stream.cuda_stream)
-        else:
-            self.context.execute_async_v2(self.bindings, self.stream.cuda_stream)
-            
-        self.stream.synchronize()
-
-        return tuple(outputs[i]
-                    for i in self.idx) if len(outputs) > 1 else outputs[0]
+            # Return outputs
+            return tuple(outputs[i] for i in self.idx) if len(outputs) > 1 else outputs[0]
 
 
 class TRTProfilerV1(trt.IProfiler):

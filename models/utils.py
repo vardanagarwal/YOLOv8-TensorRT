@@ -68,12 +68,24 @@ def blob(im: ndarray, return_seg: bool = False) -> Union[ndarray, Tuple]:
         return im
 
 
-def batch_blob(im: List[ndarray]) -> torch.Tensor:
-    im = np.stack(im)
-    im = im[..., ::-1].transpose((0, 3, 1, 2))
+def batch_blob(im: List[ndarray], half: bool=False) -> torch.Tensor:
+    """Optimized batch preparation with minimal conversions"""
+    # Stack images and convert BGR to RGB
+    im = np.stack(im, axis=0)
+    im = im[..., ::-1].transpose(0, 3, 1, 2)
+    
+    # Ensure memory is contiguous and convert to tensor
     im = np.ascontiguousarray(im)
-    im = torch.from_numpy(im)
-    return im
+    tensor = torch.from_numpy(im)
+    
+    # Convert to FP16 if requested (do this on CPU)
+    if half:
+        tensor = tensor.half()
+    
+    # Pin memory for faster transfer
+    tensor = tensor.pin_memory()
+    
+    return tensor
 
 
 def sigmoid(x: ndarray) -> ndarray:

@@ -4,12 +4,13 @@ from pathlib import Path
 import numpy as np
 import cv2
 import torch
-import torch.cuda.nvtx as nvtx
+# import torch.cuda.nvtx as nvtx
 from concurrent.futures import ThreadPoolExecutor
 
 from config import CLASSES_DET, COLORS
 from models.torch_utils import det_postprocess
 from models.utils import batch_blob, letterbox, path_to_list
+from nvtx_profiler import profiler
 
 
 def process_single_image(image, W, H, args, save_path):
@@ -62,172 +63,125 @@ def prepare_batch_threaded(batch_images, W, H, args, save_path, max_workers=16):
 
 
 def main(args: argparse.Namespace) -> None:
-    nvtx.range_push("Initialization")
-    device = torch.device(args.device)
-    Engine = TRTModule(args.engine, device)
-    H, W = Engine.inp_info[0].shape[-2:]
-    BATCH_SIZE = args.batch_size
+    with profiler.range("Initialization"):
+        device = torch.device(args.device)
+        Engine = TRTModule(args.engine, device)
+        H, W = Engine.inp_info[0].shape[-2:]
+        BATCH_SIZE = args.batch_size
 
-    # set desired output names order
-    Engine.set_desired(["num_dets", "bboxes", "scores", "labels"])
-    images = path_to_list(args.imgs)
-    if args.save:
-        save_path = Path(args.out_dir)
+        print("\nDiagnostic Information:")
+        print("-" * 40)
+        print(f"CUDA Device: {torch.cuda.get_device_name()}")
+        print(f"CUDA Capability: {torch.cuda.get_device_capability()}")
+        print(f"FP16 Mode: {args.half}")
+        print(f"Batch Size: {BATCH_SIZE}")
+        print(f"Input Resolution: {W}x{H}")
+        print("-" * 40 + "\n")
 
-        if not save_path.exists():
-            save_path.mkdir(parents=True, exist_ok=True)
-
-    nvtx.range_pop()  # End Initialization
-
-    # Warmup
-    nvtx.range_push("Warmup")
-    dummy_input = torch.randn(BATCH_SIZE, 3, H, W, device=device)
-    for _ in range(3):
-        Engine(dummy_input)
-    torch.cuda.synchronize()
-    nvtx.range_pop()  # End Warmup
-
-    for i in range(0, len(images), BATCH_SIZE):
-        nvtx.range_push(f"Batch {i//BATCH_SIZE}")
+        Engine.set_desired(["num_dets", "bboxes", "scores", "labels"])
+        images = path_to_list(args.imgs)
         if args.save:
             save_path = Path(args.out_dir)
-        batch_images = images[i : i + BATCH_SIZE]
-        preprocessed_images = []
-        metadata = []
-        dwdh_list = []
-        nvtx.range_push("Image Loading & Preprocessing CPU")
+            if not save_path.exists():
+                save_path.mkdir(parents=True, exist_ok=True)
 
-        # Prepare batch
-        if args.multi_thread:
-            preprocessed_images, metadata, dwdh_list = prepare_batch_threaded(
-                batch_images, W, H, args, save_path if args.save else None
-            )
-        else:
-            for image in batch_images:
-                bgr = cv2.imread(str(image))
-                if bgr is None:
-                    continue
+    # Warmup
+    with profiler.range("Warmup"):
+        print("Starting warmup...")
+        warmup_input = torch.randn(BATCH_SIZE, 3, H, W, device=device, 
+                               dtype=torch.float16 if args.half else torch.float32)
+        # Regular warmup
+        for _ in range(3):
+            with torch.cuda.stream(Engine.stream):
+                output = Engine(warmup_input)
+                torch.cuda.current_stream().synchronize()
+        print("Warmup complete\n")
 
-                if args.save:
-                    draw = bgr.copy()
+    print(f"Processing {len(images)} images in {(len(images) + BATCH_SIZE - 1) // BATCH_SIZE} batches")
 
-                # Perform letterbox operation
-                bgr, ratio, dwdh = letterbox(bgr, (W, H))
-
-                metadata.append(
-                    {
-                        "ratio": ratio,
-                    }
+    for i in range(0, len(images), BATCH_SIZE):
+        with profiler.range("Batch"):
+            batch_images = images[i : i + BATCH_SIZE]
+            
+            with profiler.range("Image Loading & Preprocessing"):
+                preprocessed_images, metadata, dwdh_list = prepare_batch_threaded(
+                    batch_images, W, H, args, save_path if args.save else None
                 )
 
-                if args.save:
-                    metadata[-1]["draw"] = draw
-                    metadata[-1]["save_path"] = save_path / image.name
+                # Pad batch if needed
+                while len(preprocessed_images) < BATCH_SIZE:
+                    preprocessed_images.append(preprocessed_images[0])
+                    metadata.append(metadata[0])
+                    dwdh_list.append(dwdh_list[0])
 
-                preprocessed_images.append(bgr)
-                dwdh_list.append(dwdh)
+            with profiler.range("Tensor Preparation"):
+                with torch.cuda.stream(Engine.stream):
+                    # Prepare input tensor with proper memory alignment
+                    batch_tensor = batch_blob(preprocessed_images, args.half)
+                    batch_tensor = batch_tensor.to(device, non_blocking=True) / 255.0
+                    
+                    # Prepare dwdh tensor efficiently
+                    dwdh_tensor = torch.tensor(dwdh_list, 
+                                             dtype=torch.float16 if args.half else torch.float32,
+                                             device=device)
+                    dwdh_tensor = torch.tile(dwdh_tensor, (1, 2))
 
-        nvtx.range_pop()  # End Image Loading & Preprocessing
+            with profiler.range("Inference"):
+                outputs = Engine(batch_tensor)
 
-        if not preprocessed_images:
-            continue
+            with profiler.range("Post-processing"):
+                processed_results = []
+                for idx in range(len(batch_images)):
+                    single_data = [d[idx : idx + 1] for d in outputs]
+                    bboxes, scores, labels = det_postprocess(single_data)
+                    
+                    if bboxes.numel() > 0:
+                        bboxes -= dwdh_tensor[idx].view(1, -1)
+                        bboxes /= metadata[idx]["ratio"]
+                        processed_results.append({
+                            "bboxes": bboxes,
+                            "scores": scores,
+                            "labels": labels,
+                            "metadata": metadata[idx],
+                        })
 
-        nvtx.range_push("Batch Padding")
-        # Pad the batch if necessary
-        while len(preprocessed_images) < BATCH_SIZE:
-            preprocessed_images.append(preprocessed_images[0])
-            metadata.append(metadata[0])
-        nvtx.range_pop()  # End Batch Padding
+                # Visualization code...
+                for result in processed_results:
+                    if not args.save and not args.show:
+                        continue
+                        
+                    bboxes = result["bboxes"].cpu()
+                    scores = result["scores"].cpu()
+                    labels = result["labels"].cpu()
+                    
+                    if args.save:
+                        draw = result["metadata"]["draw"]
+                        save_path = result["metadata"]["save_path"]
+                        
+                        for bbox, score, label in zip(bboxes, scores, labels):
+                            bbox = bbox.round().int().tolist()
+                            cls_id = int(label)
+                            cls = CLASSES_DET[cls_id]
+                            color = COLORS[cls]
+                            
+                            text = f"{cls}:{score:.3f}"
+                            x1, y1, x2, y2 = bbox
+                            
+                            if args.show or args.save:
+                                (tw, th), bl = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 1)
+                                y1_text = min(y1 + 1, draw.shape[0])
+                                
+                                cv2.rectangle(draw, (x1, y1), (x2, y2), color, 2)
+                                cv2.rectangle(draw, (x1, y1_text), (x1 + tw, y1_text + th + bl), (0, 0, 255), -1)
+                                cv2.putText(draw, text, (x1, y1_text + th), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                                
+                        if args.show:
+                            cv2.imshow("result", draw)
+                            cv2.waitKey(0)
+                        if args.save:
+                            cv2.imwrite(str(save_path), draw)
 
-        # Stack tensors into a batch
-        nvtx.range_push("Tensor Preparation and Push to GPU")
-        batch_tensor = batch_blob(preprocessed_images)
-        batch_tensor = batch_tensor.to(device) / 255.0
-
-        # Handle dwdh properly
-        dwdh_tensor = torch.tile(
-            torch.tensor(dwdh_list, dtype=torch.float32, device=device), (1, 2)
-        )
-        nvtx.range_pop()  # End Tensor Preparation
-
-        # inference
-        nvtx.range_push("Inference")
-        data = Engine(batch_tensor)
-        nvtx.range_pop()  # End Inference
-
-        nvtx.range_push("Post-processing")
-        # Process each image in the batch
-        processed_results = []
-        for idx in range(len(batch_images)):
-            # Extract single image data from batch
-            single_data = [d[idx : idx + 1] for d in data]
-
-            bboxes, scores, labels = det_postprocess(single_data)
-            # if bboxes.numel() == 0:
-            #     print(f'{batch_images[idx]}: no object!')
-            #     continue
-            if bboxes.numel() > 0:
-                bboxes -= dwdh_tensor[idx].view(1, -1)
-                bboxes /= metadata[idx]["ratio"]
-
-                processed_results.append(
-                    {
-                        "bboxes": bboxes,
-                        "scores": scores,
-                        "labels": labels,
-                        "metadata": metadata[idx],
-                    }
-                )
-
-        for result in processed_results:
-            bboxes = result["bboxes"].cpu()
-            scores = result["scores"].cpu()
-            labels = result["labels"].cpu()
-            if args.save:
-                draw = result["metadata"]["draw"]
-                save_path = result["metadata"]["save_path"]
-
-            # Draw detections
-            for bbox, score, label in zip(bboxes, scores, labels):
-                bbox = bbox.round().int().tolist()
-                cls_id = int(label)
-                cls = CLASSES_DET[cls_id]
-                color = COLORS[cls]
-
-                text = f"{cls}:{score:.3f}"
-                x1, y1, x2, y2 = bbox
-
-                if args.show or args.save:
-                    (tw, th), bl = cv2.getTextSize(
-                        text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 1
-                    )
-                    y1_text = min(y1 + 1, draw.shape[0])
-
-                    cv2.rectangle(draw, (x1, y1), (x2, y2), color, 2)
-                    cv2.rectangle(
-                        draw,
-                        (x1, y1_text),
-                        (x1 + tw, y1_text + th + bl),
-                        (0, 0, 255),
-                        -1,
-                    )
-                    cv2.putText(
-                        draw,
-                        text,
-                        (x1, y1_text + th),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.75,
-                        (255, 255, 255),
-                        2,
-                    )
-
-            if args.show:
-                cv2.imshow("result", draw)
-                cv2.waitKey(0)
-            if args.save:
-                cv2.imwrite(str(save_path), draw)
-        nvtx.range_pop()  # End Post-processing
-        nvtx.range_pop()  # End Batch
+    profiler.print_stats()
 
 
 def parse_args() -> argparse.Namespace:
@@ -249,6 +203,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--multi-thread", action="store_true", help="Use multi-threading"
+    )
+    parser.add_argument(
+        "--half", action="store_true", help="Use half precision for inference"
     )
     args = parser.parse_args()
     return args
