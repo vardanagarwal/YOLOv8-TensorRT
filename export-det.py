@@ -48,6 +48,9 @@ def parse_args():
                         type=str,
                         default='cpu',
                         help='Export ONNX device')
+    parser.add_argument('--fp16',
+                       action='store_true',
+                       help='Export ONNX model with fp16 mode')
     args = parser.parse_args()
     assert len(args.input_shape) == 4
     PostDetect.conf_thres = args.conf_thres
@@ -66,6 +69,9 @@ def main(args):
         m.to(args.device)
     model.to(args.device)
     fake_input = torch.randn(args.input_shape).to(args.device)
+    if args.fp16:
+        fake_input = fake_input.half()
+        model = model.half()
     for _ in range(2):
         model(fake_input)
     save_path = args.weights.replace('.pt', '.onnx')

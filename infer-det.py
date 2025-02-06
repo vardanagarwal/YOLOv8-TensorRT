@@ -142,11 +142,17 @@ def main(args: argparse.Namespace) -> None:
         # Stack tensors into a batch
         nvtx.range_push("Tensor Preparation and Push to GPU")
         batch_tensor = batch_blob(preprocessed_images)
-        batch_tensor = batch_tensor.to(device) / 255.0
+        if args.fp16:
+            batch_tensor = batch_tensor.to(device).half() / 255.0
+        else:
+            batch_tensor = batch_tensor.to(device) / 255.0
 
         # Handle dwdh properly
         dwdh_tensor = torch.tile(
-            torch.tensor(dwdh_list, dtype=torch.float32, device=device), (1, 2)
+            torch.tensor(
+                dwdh_list,
+                dtype=torch.float16 if args.fp16 else torch.float32, 
+                device=device), (1, 2)
         )
         nvtx.range_pop()  # End Tensor Preparation
 
@@ -250,6 +256,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--multi-thread", action="store_true", help="Use multi-threading"
     )
+    parser.add_argument("--fp16", action="store_true", help="Use FP16 mode")
     args = parser.parse_args()
     return args
 

@@ -72,8 +72,9 @@ def batch_blob(im: List[ndarray]) -> torch.Tensor:
     im = np.stack(im)
     im = im[..., ::-1].transpose((0, 3, 1, 2))
     im = np.ascontiguousarray(im)
-    im = torch.from_numpy(im)
-    return im
+    tensor = torch.from_numpy(im)
+    tensor = tensor.pin_memory()
+    return tensor
 
 
 def sigmoid(x: ndarray) -> ndarray:
